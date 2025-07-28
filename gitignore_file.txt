@@ -1,0 +1,53 @@
+# Composer dependencies
+/vendor/
+composer.lock
+
+# Database configuration (IMPORTANT: Keep this private)
+config/database.php
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+*.log
+logs/
+
+# Cache files
+cache/
+tmp/
+
+# Upload directories (if any)
+uploads/
+images/uploads/
+
+# Session files
+sessions/
+
+# Backup files
+*.bak
+*.backup
+*.sql
+
+# Node modules (if you use any frontend tools)
+node_modules/
+package-lock.json
+
+# PHP specific
+*.php~
