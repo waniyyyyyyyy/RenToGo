@@ -95,7 +95,7 @@ try {
             break;
             
         case 'students':
-            // Student activity with proper JOINs
+            // Booking History with proper JOINs
             $query = "SELECT 
                         u.username,
                         COALESCE(s.student_number, 'N/A') as student_number,
@@ -610,7 +610,7 @@ try {
                                     <option value="bookings" <?php echo $report_type == 'bookings' ? 'selected' : ''; ?>>Booking Analytics</option>
                                     <option value="revenue" <?php echo $report_type == 'revenue' ? 'selected' : ''; ?>>Revenue Report</option>
                                     <option value="drivers" <?php echo $report_type == 'drivers' ? 'selected' : ''; ?>>Driver Performance</option>
-                                    <option value="students" <?php echo $report_type == 'students' ? 'selected' : ''; ?>>Student Activity</option>
+                                    <option value="students" <?php echo $report_type == 'students' ? 'selected' : ''; ?>>Booking History</option>
                                 </select>
                             </div>
                             <div class="col-md-3">

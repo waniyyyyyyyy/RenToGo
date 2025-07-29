@@ -11,8 +11,9 @@ if (!isset($_SESSION['userid']) || $_SESSION['role'] !== 'student') {
 $database = new Database();
 $db = $database->getConnection();
 $message = '';
+$error = '';
 
-// UPDATED: Handle booking cancellation with proper functionality
+// Handle booking cancellation
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['cancel_booking'])) {
     $bookingid = $_POST['bookingid'];
     
@@ -39,56 +40,99 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['cancel_booking'])) {
             if ($stmt->execute()) {
                 $message = "Booking cancelled successfully. No charges will be applied.";
             } else {
-                $message = "Error cancelling booking. Please try again.";
+                $error = "Error cancelling booking. Please try again.";
             }
         } else {
-            $message = "Cannot cancel booking less than 1 hour before pickup time.";
+            $error = "Cannot cancel booking less than 1 hour before pickup time.";
         }
     } elseif ($booking && $booking['bookingstatus'] != 'pending') {
-        $message = "This booking cannot be cancelled. Only pending bookings can be cancelled.";
+        $error = "This booking cannot be cancelled. Only pending bookings can be cancelled.";
     } else {
-        $message = "Booking not found or you don't have permission to cancel it.";
+        $error = "Booking not found or you don't have permission to cancel it.";
     }
 }
 
-// Handle rating submission
+// FIXED: Handle rating submission with better error handling and validation
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_rating'])) {
-    $bookingid = $_POST['bookingid'];
-    $driverid = $_POST['driverid'];
+    $bookingid = (int)$_POST['bookingid'];
+    $driverid = (int)$_POST['driverid'];
     $rating = (int)$_POST['rating'];
     $review = trim($_POST['review']);
     
-    // Check if already rated
-    $query = "SELECT ratingid FROM rating WHERE bookingid = ? AND userid = ?";
-    $stmt = $db->prepare($query);
-    $stmt->bindParam(1, $bookingid);
-    $stmt->bindParam(2, $_SESSION['userid']);
-    $stmt->execute();
+    // Debug logging
+    error_log("Rating submission attempt - Booking: $bookingid, Driver: $driverid, Rating: $rating");
     
-    if ($stmt->rowCount() == 0) {
-        // Insert new rating
-        $query = "INSERT INTO rating (bookingid, userid, driverid, rating, review) VALUES (?, ?, ?, ?, ?)";
-        $stmt = $db->prepare($query);
-        $stmt->bindParam(1, $bookingid);
-        $stmt->bindParam(2, $_SESSION['userid']);
-        $stmt->bindParam(3, $driverid);
-        $stmt->bindParam(4, $rating);
-        $stmt->bindParam(5, $review);
-        
-        if ($stmt->execute()) {
-            // Update driver's average rating
-            $query = "UPDATE driver SET rating = (SELECT AVG(rating) FROM rating WHERE driverid = ?) WHERE driverid = ?";
-            $stmt = $db->prepare($query);
-            $stmt->bindParam(1, $driverid);
-            $stmt->bindParam(2, $driverid);
-            $stmt->execute();
-            
-            $message = "Rating submitted successfully!";
-        } else {
-            $message = "Error submitting rating.";
-        }
+    // Validate inputs
+    if ($rating < 1 || $rating > 5) {
+        $error = "Please provide a valid rating between 1 and 5 stars.";
     } else {
-        $message = "You have already rated this ride.";
+        try {
+            // Check if booking exists and belongs to user and is completed
+            $query = "SELECT bookingid, bookingstatus FROM booking WHERE bookingid = ? AND userid = ? AND bookingstatus = 'completed'";
+            $stmt = $db->prepare($query);
+            $stmt->bindParam(1, $bookingid, PDO::PARAM_INT);
+            $stmt->bindParam(2, $_SESSION['userid'], PDO::PARAM_INT);
+            $stmt->execute();
+            $booking_check = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$booking_check) {
+                $error = "Invalid booking or booking is not completed yet.";
+                error_log("Booking validation failed for booking $bookingid, user " . $_SESSION['userid']);
+            } else {
+                // Check if already rated
+                $query = "SELECT ratingid FROM rating WHERE bookingid = ? AND userid = ?";
+                $stmt = $db->prepare($query);
+                $stmt->bindParam(1, $bookingid, PDO::PARAM_INT);
+                $stmt->bindParam(2, $_SESSION['userid'], PDO::PARAM_INT);
+                $stmt->execute();
+                
+                if ($stmt->rowCount() > 0) {
+                    $error = "You have already rated this ride.";
+                } else {
+                    // Start transaction for rating insertion and driver update
+                    $db->beginTransaction();
+                    
+                    try {
+                        // Insert new rating
+                        $query = "INSERT INTO rating (bookingid, userid, driverid, rating, review, created_at) VALUES (?, ?, ?, ?, ?, NOW())";
+                        $stmt = $db->prepare($query);
+                        $stmt->bindParam(1, $bookingid, PDO::PARAM_INT);
+                        $stmt->bindParam(2, $_SESSION['userid'], PDO::PARAM_INT);
+                        $stmt->bindParam(3, $driverid, PDO::PARAM_INT);
+                        $stmt->bindParam(4, $rating, PDO::PARAM_INT);
+                        $stmt->bindParam(5, $review, PDO::PARAM_STR);
+                        
+                        if ($stmt->execute()) {
+                            // Update driver's average rating
+                            $query = "UPDATE driver SET rating = (
+                                        SELECT COALESCE(ROUND(AVG(rating), 1), 0) 
+                                        FROM rating 
+                                        WHERE driverid = ?
+                                      ) WHERE driverid = ?";
+                            $stmt = $db->prepare($query);
+                            $stmt->bindParam(1, $driverid, PDO::PARAM_INT);
+                            $stmt->bindParam(2, $driverid, PDO::PARAM_INT);
+                            $stmt->execute();
+                            
+                            $db->commit();
+                            $message = "Rating submitted successfully! Thank you for your feedback.";
+                            error_log("Rating submitted successfully - Booking: $bookingid, Driver: $driverid, Rating: $rating");
+                        } else {
+                            $db->rollback();
+                            $error = "Error submitting rating. Please try again.";
+                            error_log("Failed to insert rating");
+                        }
+                    } catch (Exception $e) {
+                        $db->rollback();
+                        $error = "Database error while submitting rating: " . $e->getMessage();
+                        error_log("Rating submission error: " . $e->getMessage());
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            $error = "System error: " . $e->getMessage();
+            error_log("Rating system error: " . $e->getMessage());
+        }
     }
 }
 
@@ -96,9 +140,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_rating'])) {
 $status_filter = isset($_GET['status']) && $_GET['status'] !== '' ? trim($_GET['status']) : '';
 $date_filter = isset($_GET['date']) && $_GET['date'] !== '' ? trim($_GET['date']) : '';
 
-// UPDATED: Build query with driver's full name instead of username
+// Build query with driver's full name and proper rating join
 $query = "SELECT b.*, d.carmodel, d.plate, d.car_type, u.full_name as driver_name, u.notel as driver_phone,
-                 r.rating as user_rating, r.review as user_review
+                 r.rating as user_rating, r.review as user_review, r.created_at as rating_date
           FROM booking b
           INNER JOIN driver d ON b.driverid = d.driverid
           INNER JOIN user u ON d.userid = u.userid
@@ -134,7 +178,7 @@ try {
     
 } catch (PDOException $e) {
     $bookings = [];
-    $message = "Database error: " . $e->getMessage();
+    $error = "Database error: " . $e->getMessage();
     error_log("Student bookings query error: " . $e->getMessage());
 }
 ?>
@@ -148,7 +192,7 @@ try {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <style>
-        
+        /* Keep all your existing CSS styles here - they're fine */
         * {
             box-sizing: border-box;
         }
@@ -333,19 +377,52 @@ try {
             background-color: #ef4444;
         }
 
-        /* Rating system */
+        /* FIXED: Rating system styles - ONLY THE ESSENTIAL FIXES */
+        .rating-input {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 5px;
+            margin: 1rem 0;
+        }
+        
         .rating-input input[type="radio"] {
             display: none;
         }
         
         .star-label {
-            display: inline-block;
-            margin: 0 2px;
-            transition: color 0.2s ease;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 2rem;
         }
         
         .star-label:hover {
             transform: scale(1.1);
+        }
+
+        .star-label i {
+            color: #ddd;
+            transition: color 0.2s ease;
+        }
+
+        .star-label:hover i,
+        .star-label.active i {
+            color: #ffc107 !important;
+        }
+
+        /* Rating display */
+        .rating-display {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .rating-display .bi-star-fill {
+            color: #ffc107;
+        }
+
+        .rating-display .bi-star {
+            color: #dee2e6;
         }
 
         /* Cancel confirmation modal */
@@ -580,8 +657,15 @@ try {
                 <div class="container-fluid">
                     
                     <?php if (!empty($message)): ?>
-                        <div class="alert alert-<?php echo strpos($message, 'Error') !== false || strpos($message, 'cannot') !== false || strpos($message, 'already') !== false || strpos($message, 'Cannot') !== false ? 'danger' : 'success'; ?> alert-dismissible fade show">
-                            <i class="bi bi-<?php echo strpos($message, 'Error') !== false || strpos($message, 'cannot') !== false || strpos($message, 'already') !== false || strpos($message, 'Cannot') !== false ? 'exclamation-triangle' : 'check-circle'; ?>"></i> <?php echo htmlspecialchars($message); ?>
+                        <div class="alert alert-success alert-dismissible fade show">
+                            <i class="bi bi-check-circle"></i> <?php echo htmlspecialchars($message); ?>
+                            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        </div>
+                    <?php endif; ?>
+                    
+                    <?php if (!empty($error)): ?>
+                        <div class="alert alert-danger alert-dismissible fade show">
+                            <i class="bi bi-exclamation-triangle"></i> <?php echo htmlspecialchars($error); ?>
                             <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                         </div>
                     <?php endif; ?>
@@ -739,7 +823,7 @@ try {
                                             <!-- Actions -->
                                             <div>
                                                 <?php if ($booking['bookingstatus'] == 'pending'): ?>
-                                                    <!-- UPDATED: Enhanced cancel button with confirmation -->
+                                                    <!-- Enhanced cancel button with confirmation -->
                                                     <button type="button" class="btn btn-danger btn-sm w-100" 
                                                             onclick="showCancelConfirmation(<?php echo $booking['bookingid']; ?>, '<?php echo htmlspecialchars($booking['driver_name'], ENT_QUOTES); ?>', '<?php echo date('d M Y, h:i A', strtotime($booking['pickupdate'])); ?>')">
                                                         <i class="bi bi-x-circle"></i> Cancel Booking
@@ -757,7 +841,7 @@ try {
                                                     </button>
                                                 <?php elseif ($booking['user_rating']): ?>
                                                     <div class="text-center">
-                                                        <div class="text-warning mb-1">
+                                                        <div class="rating-display mb-1">
                                                             <?php for ($i = 1; $i <= 5; $i++): ?>
                                                                 <i class="bi bi-star<?php echo $i <= $booking['user_rating'] ? '-fill' : ''; ?>"></i>
                                                             <?php endfor; ?>
@@ -768,6 +852,11 @@ try {
                                                                 <small class="text-muted d-block">"<?php echo htmlspecialchars($booking['user_review']); ?>"</small>
                                                             </div>
                                                         <?php endif; ?>
+                                                        <?php if ($booking['rating_date']): ?>
+                                                            <small class="text-muted d-block mt-1">
+                                                                Rated on <?php echo date('d M Y', strtotime($booking['rating_date'])); ?>
+                                                            </small>
+                                                        <?php endif; ?>
                                                     </div>
                                                 <?php endif; ?>
                                             </div>
@@ -777,7 +866,7 @@ try {
                             </div>
                         </div>
 
-                        <!-- Rating Modal -->
+                        <!-- FIXED: Rating Modal with working functionality -->
                         <?php if ($booking['bookingstatus'] == 'completed' && !$booking['user_rating']): ?>
                         <div class="modal fade" id="ratingModal<?php echo $booking['bookingid']; ?>" tabindex="-1">
                             <div class="modal-dialog">
@@ -788,35 +877,53 @@ try {
                                         </h5>
                                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                                     </div>
-                                    <form method="POST" action="">
+                                    <form method="POST" action="" id="ratingForm<?php echo $booking['bookingid']; ?>">
                                         <div class="modal-body">
                                             <input type="hidden" name="bookingid" value="<?php echo $booking['bookingid']; ?>">
                                             <input type="hidden" name="driverid" value="<?php echo $booking['driverid']; ?>">
                                             
-                                            <div class="mb-3">
-                                                <label class="form-label fw-semibold">Rating *</label>
-                                                <div class="rating-input text-center">
+                                            <!-- Trip Summary -->
+                                            <div class="alert alert-light mb-3">
+                                                <div class="d-flex justify-content-between">
+                                                    <div>
+                                                        <strong><?php echo htmlspecialchars($booking['driver_name']); ?></strong><br>
+                                                        <small class="text-muted"><?php echo htmlspecialchars($booking['carmodel']); ?> (<?php echo htmlspecialchars($booking['plate']); ?>)</small>
+                                                    </div>
+                                                    <div class="text-end">
+                                                        <strong>RM <?php echo number_format($booking['totalcost'], 2); ?></strong><br>
+                                                        <small class="text-muted"><?php echo date('d M Y', strtotime($booking['pickupdate'])); ?></small>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            
+                                            <div class="mb-4">
+                                                <label class="form-label fw-semibold">How was your ride? *</label>
+                                                <div class="rating-input" id="ratingInput<?php echo $booking['bookingid']; ?>">
                                                     <?php for ($i = 1; $i <= 5; $i++): ?>
                                                         <input type="radio" id="rating<?php echo $booking['bookingid']; ?>_<?php echo $i; ?>" 
                                                                name="rating" value="<?php echo $i; ?>" required>
                                                         <label for="rating<?php echo $booking['bookingid']; ?>_<?php echo $i; ?>" 
-                                                               class="star-label">
-                                                            <i class="bi bi-star-fill" style="font-size: 2rem; color: #ddd; cursor: pointer;"></i>
+                                                               class="star-label" data-rating="<?php echo $i; ?>">
+                                                            <i class="bi bi-star-fill"></i>
                                                         </label>
                                                     <?php endfor; ?>
+                                                </div>
+                                                <div class="text-center">
+                                                    <small class="text-muted" id="ratingText<?php echo $booking['bookingid']; ?>">Click stars to rate</small>
                                                 </div>
                                             </div>
                                             
                                             <div class="mb-3">
                                                 <label for="review<?php echo $booking['bookingid']; ?>" class="form-label fw-semibold">Review (Optional)</label>
                                                 <textarea class="form-control" id="review<?php echo $booking['bookingid']; ?>" 
-                                                          name="review" rows="3" 
-                                                          placeholder="Share your experience with other students..."></textarea>
+                                                          name="review" rows="3" maxlength="500"
+                                                          placeholder="Share your experience with other students... Was the driver punctual? Was the car clean? Any other feedback?"></textarea>
+                                                <small class="text-muted">Maximum 500 characters</small>
                                             </div>
                                         </div>
                                         <div class="modal-footer">
                                             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                                            <button type="submit" name="submit_rating" class="btn btn-primary">
+                                            <button type="submit" name="submit_rating" class="btn btn-primary" id="submitBtn<?php echo $booking['bookingid']; ?>">
                                                 <i class="bi bi-check-circle"></i> Submit Rating
                                             </button>
                                         </div>
@@ -922,138 +1029,118 @@ try {
                 const form = document.getElementById(`cancelForm${currentBookingId}`);
                 if (form) {
                     form.submit();
-                } else {
-                    // Fallback: create and submit form
-                    const fallbackForm = document.createElement('form');
-                    fallbackForm.method = 'POST';
-                    fallbackForm.action = '';
-                    
-                    const bookingInput = document.createElement('input');
-                    bookingInput.type = 'hidden';
-                    bookingInput.name = 'bookingid';
-                    bookingInput.value = currentBookingId;
-                    
-                    const actionInput = document.createElement('input');
-                    actionInput.type = 'hidden';
-                    actionInput.name = 'cancel_booking';
-                    actionInput.value = '1';
-                    
-                    fallbackForm.appendChild(bookingInput);
-                    fallbackForm.appendChild(actionInput);
-                    document.body.appendChild(fallbackForm);
-                    fallbackForm.submit();
                 }
             }
         }
 
-        // Enhanced filtering with proper form handling
+        // FIXED: Simple and working rating system
         document.addEventListener('DOMContentLoaded', function() {
-            const filterForm = document.getElementById('filterForm');
-            const statusSelect = document.getElementById('status');
-            const dateInput = document.getElementById('date');
+            console.log('Rating system initializing...');
             
-            // Immediate submit for status changes
-            if (statusSelect) {
-                statusSelect.addEventListener('change', function() {
-                    filterForm.submit();
-                });
-            }
+            // Find all rating forms
+            const ratingForms = document.querySelectorAll('form[id^="ratingForm"]');
+            console.log('Found rating forms:', ratingForms.length);
             
-            // Immediate submit for date changes
-            if (dateInput) {
-                dateInput.addEventListener('change', function() {
-                    filterForm.submit();
-                });
-            }
-
-            // Rating system
-            const ratingInputs = document.querySelectorAll('.rating-input');
-            
-            ratingInputs.forEach(ratingGroup => {
-                const inputs = ratingGroup.querySelectorAll('input[type="radio"]');
-                const labels = ratingGroup.querySelectorAll('.star-label i');
+            ratingForms.forEach(form => {
+                const formId = form.id;
+                const bookingId = formId.replace('ratingForm', '');
+                console.log('Setting up rating for booking:', bookingId);
                 
-                inputs.forEach((input, index) => {
-                    input.addEventListener('change', function() {
-                        labels.forEach((label, labelIndex) => {
-                            if (labelIndex <= index) {
-                                label.style.color = '#ffc107';
+                // Get elements
+                const starLabels = form.querySelectorAll('.star-label');
+                const radioInputs = form.querySelectorAll('input[name="rating"]');
+                const ratingText = document.getElementById(`ratingText${bookingId}`);
+                const submitBtn = document.getElementById(`submitBtn${bookingId}`);
+                
+                console.log('Found stars:', starLabels.length, 'radios:', radioInputs.length);
+                
+                // Add click events to stars
+                starLabels.forEach((label, index) => {
+                    label.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        const rating = index + 1;
+                        console.log('Star clicked:', rating);
+                        
+                        // Check the radio button
+                        radioInputs[index].checked = true;
+                        console.log('Radio checked:', radioInputs[index].checked);
+                        
+                        // Update star colors
+                        starLabels.forEach((star, starIndex) => {
+                            const starIcon = star.querySelector('i');
+                            if (starIndex <= index) {
+                                starIcon.style.color = '#ffc107';
+                                star.classList.add('active');
                             } else {
-                                label.style.color = '#ddd';
+                                starIcon.style.color = '#ddd';
+                                star.classList.remove('active');
                             }
                         });
+                        
+                        // Update text
+                        if (ratingText) {
+                            const ratingTexts = ['Poor', 'Fair', 'Good', 'Very Good', 'Excellent'];
+                            ratingText.textContent = `${rating} star${rating > 1 ? 's' : ''} - ${ratingTexts[rating-1]}`;
+                            ratingText.className = 'text-warning fw-bold';
+                        }
+                        
+                        // Enable submit button
+                        if (submitBtn) {
+                            submitBtn.disabled = false;
+                        }
+                        
+                        console.log('Rating set to:', rating);
                     });
-                });
-                
-                // Hover effects
-                labels.forEach((label, index) => {
+                    
+                    // Hover effects
                     label.addEventListener('mouseenter', function() {
-                        labels.forEach((l, lIndex) => {
-                            if (lIndex <= index) {
-                                l.style.color = '#ffc107';
+                        const hoverRating = index + 1;
+                        starLabels.forEach((star, starIndex) => {
+                            const starIcon = star.querySelector('i');
+                            if (starIndex < hoverRating) {
+                                starIcon.style.color = '#ffc107';
                             } else {
-                                l.style.color = '#ddd';
+                                starIcon.style.color = '#ddd';
                             }
                         });
                     });
                 });
                 
-                ratingGroup.addEventListener('mouseleave', function() {
-                    const checkedInput = ratingGroup.querySelector('input[type="radio"]:checked');
-                    if (checkedInput) {
-                        const checkedIndex = Array.from(inputs).indexOf(checkedInput);
-                        labels.forEach((label, labelIndex) => {
-                            if (labelIndex <= checkedIndex) {
-                                label.style.color = '#ffc107';
+                // Reset on mouse leave
+                form.addEventListener('mouseleave', function() {
+                    const checkedRadio = form.querySelector('input[name="rating"]:checked');
+                    if (checkedRadio) {
+                        const selectedRating = parseInt(checkedRadio.value);
+                        starLabels.forEach((star, starIndex) => {
+                            const starIcon = star.querySelector('i');
+                            if (starIndex < selectedRating) {
+                                starIcon.style.color = '#ffc107';
                             } else {
-                                label.style.color = '#ddd';
+                                starIcon.style.color = '#ddd';
                             }
                         });
                     } else {
-                        labels.forEach(label => {
-                            label.style.color = '#ddd';
+                        starLabels.forEach(star => {
+                            star.querySelector('i').style.color = '#ddd';
                         });
                     }
                 });
-            });
-
-            // Add fade-in animations
-            const cards = document.querySelectorAll('.card');
-            cards.forEach((card, index) => {
-                card.style.animationDelay = (index * 0.1) + 's';
-            });
-
-            // Form validation and loading states
-            filterForm.addEventListener('submit', function(e) {
-                const submitBtn = this.querySelector('button[type="submit"]');
-                if (submitBtn) {
-                    const originalText = submitBtn.innerHTML;
-                    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Filtering...';
-                    submitBtn.disabled = true;
+                
+                // Form submission
+                form.addEventListener('submit', function(e) {
+                    const checkedRadio = this.querySelector('input[name="rating"]:checked');
+                    if (!checkedRadio) {
+                        e.preventDefault();
+                        alert('Please select a rating before submitting.');
+                        return false;
+                    }
                     
-                    // Re-enable after timeout
-                    setTimeout(() => {
-                        submitBtn.innerHTML = originalText;
-                        submitBtn.disabled = false;
-                    }, 5000);
-                }
-            });
-
-            // Enhanced form feedback for POST forms
-            const postForms = document.querySelectorAll('form[method="POST"]');
-            postForms.forEach(form => {
-                form.addEventListener('submit', function() {
-                    const submitBtn = this.querySelector('button[type="submit"]');
-                    if (submitBtn && !submitBtn.disabled) {
-                        const originalText = submitBtn.innerHTML;
-                        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Processing...';
+                    console.log('Form submitted with rating:', checkedRadio.value);
+                    
+                    // Show loading state
+                    if (submitBtn) {
+                        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting...';
                         submitBtn.disabled = true;
-                        
-                        // Re-enable after timeout
-                        setTimeout(() => {
-                            submitBtn.innerHTML = originalText;
-                            submitBtn.disabled = false;
-                        }, 5000);
                     }
                 });
             });
